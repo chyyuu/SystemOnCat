@@ -107,3 +107,10 @@ test_run_dir/
 
 #vim editor swap file
 *.swp
+verilator/
+.idea/
+
+.classpath
+.project
+.settings/
+docs/
