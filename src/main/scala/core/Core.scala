@@ -3,6 +3,8 @@ package systemoncat.core
 import chisel3._
 import chisel3.util._
 import systemoncat.sysbus._
+import systemoncat.mmu._
+import systemoncat.cache.Cache
 import systemoncat.devices.ROM
 import systemoncat.devices.PLICInterface
 
@@ -17,49 +19,39 @@ class DebugDevicesIO() extends Bundle {
 
 class CoreIO() extends Bundle {
     val devs = new DebugDevicesIO
-    val ram = Flipped(new SysBusSlaveBundle)
-    val ram2 = Flipped(new SysBusSlaveBundle)
-    val serial = Flipped(new SysBusSlaveBundle)
-    val flash = Flipped(new SysBusSlaveBundle)
-    val plic_interface = Flipped(new PLICInterface)
+    val ext_irq_r = Input(Bool())
+    val irq_client = Flipped(new ClientIrqIO)
+    val bus_request = Flipped(new SysBusSlaveBundle)
 }
 
-class Core() extends Module {
+class Core(not_to_cache : Seq[(BitPat, Bool)]) extends Module {
     val io = IO(new CoreIO)
     val dpath = Module(new Datapath) 
     val ctrl  = Module(new Control)
     val ifetch = Module(new IFetch)
     val dmem = Module(new DMem)
-    val irq_client = Module(new Client)
-    val plic = Module(new PLIC)
-    val rom = Module(new ROM("prog/firmware/mastercat.bin"))
-    val bus_conn = Module(new SysBusConnector(irq_client, plic, rom))
 
-    bus_conn.io.external.ram <> io.ram
-    bus_conn.io.external.ram2 <> io.ram2
-    bus_conn.io.external.serial <> io.serial
-    bus_conn.io.external.irq_client <> irq_client.io.out
-    bus_conn.io.external.plic <> plic.io.out
-    bus_conn.io.external.flash <> io.flash
-    bus_conn.io.external.rom <> rom.io.out
+    val bus_conn = Module(new SysBusConnector())
+    val mmu = Module(new MMUWrapper())
+    val cache = Module(new Cache(3, 2, 4, not_to_cache))
 
-    bus_conn.io.mmu_csr_info <> dpath.io.mmu_csr_info
-    bus_conn.io.mmu_expt <> dpath.io.mmu_expt
+    mmu.io.csr_info <> dpath.io.mmu_csr_info
+    mmu.io.expt <> dpath.io.mmu_expt
+    bus_conn.io.req <> mmu.io.req
+    bus_conn.io.res <> mmu.io.res
 
     dpath.io.ctrl <> ctrl.io
     dpath.io.debug_devs <> io.devs
     dpath.io.imem <> ifetch.io.core
     dpath.io.dmem <> dmem.io.core
-    dpath.io.irq_client <> irq_client.io.in
+    dpath.io.irq_client <> io.irq_client
 
     ifetch.io.bus <> bus_conn.io.imem
     ifetch.io.pending <> bus_conn.io.imem_pending
     dmem.io.bus <> bus_conn.io.dmem
 
-    // temporarily, no such devices
+    io.ext_irq_r <> dpath.io.ext_irq_r
 
-    val bridge = Wire(new PLICIO)
-    bridge <> plic.io.in
-    io.plic_interface <> bridge.external
-    bridge.core1_ext_irq_r <> dpath.io.core1_ext_irq_r
+    mmu.io.bus_request <> cache.io.bus.slave
+    cache.io.bus.master <> io.bus_request
 }

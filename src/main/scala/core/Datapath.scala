@@ -12,7 +12,7 @@ class DatapathIO() extends Bundle {
     val irq_client = Flipped(new ClientIrqIO)
     val mmu_csr_info = Flipped(new CSRInfo())
     val mmu_expt = Flipped(new MMUException())
-    val core1_ext_irq_r = Input(Bool())
+    val ext_irq_r = Input(Bool())
 }
 
 class Datapath() extends Module {
@@ -299,13 +299,17 @@ class Datapath() extends Module {
     mem_replay := dmem_locked || imem_locked
     mem_reg_replay := mem_replay
     mem_reg_valid := ((ex_reg_valid && !ex_replay) || (mem_replay && mem_reg_valid)) && (!csr_branch) && (!tlb_flush_pipe)
-    io.dmem.wr_data := ex_rs(1)
-    io.dmem.addr := alu.io.out
-    io.dmem.wr_en := ex_functioning && ex_ctrl_sigs.mem && isWrite(ex_ctrl_sigs.mem_cmd)
-    io.dmem.rd_en := ex_functioning && ex_ctrl_sigs.mem && isRead(ex_ctrl_sigs.mem_cmd)
+    io.dmem.req.wr_data := ex_rs(1)
+    io.dmem.req.addr := alu.io.out
+    io.dmem.req.wr_en := ex_functioning && ex_ctrl_sigs.mem && isWrite(ex_ctrl_sigs.mem_cmd)
+    io.dmem.req.rd_en := ex_functioning && ex_ctrl_sigs.mem && isRead(ex_ctrl_sigs.mem_cmd)
+    io.dmem.req.lr_en := ex_functioning && ex_ctrl_sigs.mem && ex_ctrl_sigs.mem_cmd === MOP_LR
+    io.dmem.req.sc_en := ex_functioning && ex_ctrl_sigs.mem && ex_ctrl_sigs.mem_cmd === MOP_SC
+    io.dmem.req.amo_en := ex_functioning && ex_ctrl_sigs.mem && ex_ctrl_sigs.mem_cmd === MOP_A
     // tricky. 
 
-    io.dmem.mem_type := ex_ctrl_sigs.mem_type
+    io.dmem.req.mem_type := ex_ctrl_sigs.mem_type
+    io.dmem.req.amo_op := ex_ctrl_sigs.amo_op
 
     when (!mem_replay && !ex_replay) {
         mem_reg_expt := ex_reg_expt && ex_reg_valid
@@ -313,16 +317,16 @@ class Datapath() extends Module {
         mem_reg_expt_val := ex_reg_expt_val
     }
 
-    mem_expt := (mem_reg_expt && mem_reg_valid) || io.dmem.wr_addr_invalid_expt || io.dmem.wr_access_err_expt ||
-         io.dmem.rd_addr_invalid_expt || io.dmem.rd_access_err_expt || io.mmu_expt.lPF || io.mmu_expt.sPF
+    mem_expt := (mem_reg_expt && mem_reg_valid) || io.dmem.res.expt.wr_addr_invalid_expt || io.dmem.res.expt.wr_access_err_expt ||
+         io.dmem.res.expt.rd_addr_invalid_expt || io.dmem.res.expt.rd_access_err_expt || io.mmu_expt.lPF || io.mmu_expt.sPF
     // this is a wire, so that exception can be handled before next posclk
 
     mem_cause := PriorityMux(Seq(
             (mem_reg_expt && mem_reg_valid, mem_reg_cause), 
-            (io.dmem.wr_addr_invalid_expt, Cause.SAM(3, 0)),
-            (io.dmem.rd_addr_invalid_expt, Cause.LAM(3, 0)),
-            (io.dmem.wr_access_err_expt, Cause.SAF(3, 0)), 
-            (io.dmem.rd_access_err_expt, Cause.LAF(3, 0)),
+            (io.dmem.res.expt.wr_addr_invalid_expt, Cause.SAM(3, 0)),
+            (io.dmem.res.expt.rd_addr_invalid_expt, Cause.LAM(3, 0)),
+            (io.dmem.res.expt.wr_access_err_expt, Cause.SAF(3, 0)), 
+            (io.dmem.res.expt.rd_access_err_expt, Cause.LAF(3, 0)),
             (io.mmu_expt.lPF, Cause.LPF(3, 0)),
             (io.mmu_expt.sPF, Cause.SPF(3, 0))
         ))
@@ -356,8 +360,7 @@ class Datapath() extends Module {
 
     csr.io.csr_idx := wb_reg_inst(31,20)
 
-    csr.io.ext_irq_r := io.core1_ext_irq_r // temporarily set to core1 as there would
-    // only be one core
+    csr.io.ext_irq_r := io.ext_irq_r
     csr.io.sft_irq_r := io.irq_client.sft_irq_r
     csr.io.tmr_irq_r := io.irq_client.tmr_irq_r
 
@@ -440,14 +443,14 @@ class Datapath() extends Module {
         wb_reg_inst := mem_reg_inst
         wb_reg_wdata := mem_reg_wdata
         wb_reg_eret := mem_eret
-        dmem_reg := io.dmem.rd_data
+        dmem_reg := io.dmem.res.rd_data
     }
 
     wb_reg_valid := (mem_reg_valid && (!mem_replay)) || (wb_replay && wb_reg_valid)
     
     wb_functioning := wb_reg_valid && (!wb_reg_expt) && (!wb_replay)
 
-    dmem_locked := io.dmem.locked
+    dmem_locked := io.dmem.res.locked
 
     reg_write := MuxLookup(wb_ctrl_sigs.wb_sel, wb_reg_wdata, Seq(
         WB_MEM -> dmem_reg,
@@ -463,11 +466,11 @@ class Datapath() extends Module {
     // temporary init
     // io.debug_devs.leds := alu.io.out
     io.debug_devs.leds := MuxLookup(io.debug_devs.dip_sw(1, 0), io.imem.inst, Seq(
-        1.U -> io.dmem.addr(15, 0), 
-        2.U -> Cat(io.dmem.rd_data(7, 0), io.dmem.wr_data(7, 0)),
+        1.U -> io.dmem.req.addr(15, 0), 
+        2.U -> Cat(io.dmem.res.rd_data(7, 0), io.dmem.req.wr_data(7, 0)),
         3.U -> Cat(pc_reg_valid, id_reg_valid, ex_reg_valid, mem_reg_valid,
             ex_reg_expt, mem_reg_expt, wb_reg_expt, wb_reg_interp, 
-            cur_mem_interp, prev_mem_interp, mem_has_exception, io.core1_ext_irq_r,
+            cur_mem_interp, prev_mem_interp, mem_has_exception, io.ext_irq_r,
             io.irq_client.tmr_irq_r, csr_branch, mem_reg_replay, mem_replay)
     ))
     io.debug_devs.dpy0 := pc(7, 0)
